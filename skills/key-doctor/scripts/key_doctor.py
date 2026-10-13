@@ -140,10 +140,34 @@ def report(results: list[dict], now: float) -> int:
     return 1 if trouble else 0
 
 
+def alert(results: list[dict], now: float) -> str:
+    """Short Telegram text for a watchdog cron: empty when every credential is healthy."""
+    lines = []
+    for r in results:
+        if "error" in r:
+            lines.append(f"• {r['profile']}: could not read ({r['error']})"); continue
+        for c in r["credentials"]:
+            if c["status"] == "ok" and not c["stale_bench"]:
+                continue
+            if c["status"] == "benched":
+                what = f"BENCHED, {why(c)}, until {when(c.get('benched_until'), now)}"
+            elif c["status"] == "dead":
+                what = "DEAD, the provider rejected it"
+            elif c["status"] == "model-cooldown":
+                what = "blocked for " + ", ".join(f"{m} until {when(t, now)}" for m, t in c["model_cooldowns"].items())
+            else:
+                what = "marked exhausted, bench time passed"
+            lines.append(f"• {r['profile']} · {c['provider']} ({c['label'][:24]}): {what}\n  fix: {fix_for(r['profile'], c)}")
+    if not lines:
+        return ""
+    return f"Key Doctor: {len(lines)} Hermes login(s) need attention\n" + "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Why did my Hermes key stop working?")
     parser.add_argument("-p", "--profile", help="one profile (default: all)")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--alert", action="store_true", help="watchdog mode: print only problems, nothing when healthy, always exit 0")
     parser.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.one:
@@ -152,6 +176,11 @@ def main() -> int:
     if not targets:
         print(f"No profile named {args.profile}."); return 2
     results = [read_profile(n, h) for n, h in targets]
+    if args.alert:
+        text = alert(results, time.time())
+        if text:
+            print(text)
+        return 0
     if args.json:
         print(json.dumps(results, indent=2)); return 0
     return report(results, time.time())

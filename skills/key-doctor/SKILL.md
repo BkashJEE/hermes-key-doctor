@@ -20,12 +20,15 @@ records it in `auth.json`: `last_status`, the error code and reason, and per-mod
 ## Run it
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python ~/.hermes/skills/key-doctor/scripts/key_doctor.py          # every profile
-~/.hermes/hermes-agent/venv/bin/python ~/.hermes/skills/key-doctor/scripts/key_doctor.py -p ceo   # one profile
-~/.hermes/hermes-agent/venv/bin/python ~/.hermes/skills/key-doctor/scripts/key_doctor.py --json   # for another tool
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/key-doctor.py          # every profile
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/key-doctor.py -p ceo   # one profile
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/key-doctor.py --json   # for another tool
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/key-doctor.py --alert  # only problems; silent when healthy
 ```
 
-It exits 1 when anything needs attention, so it can gate a cron job.
+It exits 1 when anything needs attention. `--alert` prints nothing when every login is healthy and a short list otherwise; the daily `key-doctor-daily` cron on the default profile runs it and sends any output to Telegram.
+
+The copy at `~/.hermes/scripts/key-doctor.py` is installed from `skills/key-doctor/scripts/key_doctor.py` in `~/hermes-key-doctor`.
 
 ## Reading the result
 
