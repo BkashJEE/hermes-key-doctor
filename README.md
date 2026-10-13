@@ -12,7 +12,19 @@ Key Doctor shows, for every Hermes profile and every pooled login:
 
 It reads through Hermes's own credential code, so the end times are the ones Hermes enforces. It is read-only and never prints a token.
 
-## Install
+## Inside Hermes Desktop
+
+As a Hermes plugin it adds a **Key Doctor** page (sidebar and ⌘K) with every Bot's logins, why each problem happened, until when, and a Copy fix button, plus a status-bar chip (`⚿ 28 keys ok`, red when something needs attention). Email labels are masked on screen.
+
+```bash
+ln -s ~/hermes-key-doctor ~/.hermes/plugins/hermes-key-doctor
+ln -s ~/hermes-key-doctor/desktop ~/.hermes/desktop-plugins/hermes-key-doctor
+hermes plugins enable hermes-key-doctor   # then reload Hermes Desktop
+```
+
+It also adds `hermes keydoctor` (`--json`, `--alert`) and the `/keys` chat command.
+
+## Install the skill only
 
 ```bash
 git clone https://github.com/BkashJEE/hermes-key-doctor && cd hermes-key-doctor
