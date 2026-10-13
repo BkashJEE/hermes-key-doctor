@@ -87,7 +87,8 @@ def read_profile(name: str, home: Path) -> dict:
 
 
 def fix_for(profile: str, c: dict) -> str | None:
-    flag = "" if profile == "default" else f"-p {profile} "
+    # Always explicit: a plain `hermes` follows ~/.hermes/active_profile, which may not be "default".
+    flag = f"-p {profile} "
     if c["model_cooldowns"] and c["status"] != "benched":
         return f"hermes {flag}auth reset {c['provider']} {c['id']}   # clears the model cooldowns on this credential"
     if c["status"] == "benched" or c["stale_bench"]:
