@@ -38,6 +38,10 @@ The copy at `~/.hermes/scripts/key-doctor.py` is installed from `skills/key-doct
 | `MODEL COOLDOWN` | The credential works, but one model is blocked on it until the time shown. A cooldown longer than a week is not a rate limit; it matches the stuck-cooldown bug (NousResearch/hermes-agent#127917). | `hermes auth reset <provider> <id>` |
 | `DEAD` | The provider rejected the credential outright. | remove it and add it again |
 | stale bench | Marked exhausted, but the time has passed. Hermes should retry it; a reset makes sure. | `hermes auth reset ...` |
+| `DEFAULT MODEL BLOCKED` | The Bot's own model has no usable login: this is "no credentials found". If a `fallback_model` works it says so instead. | the fix for the blocking login |
+| `CRON WILL FAIL` | An active cron job's model has no usable login; shows the job and its next run. | the fix for the blocking login |
+| `RISK` | Several Bots run their default model on one login with no backup: one rate limit stops all of them. | add a second login or a `fallback_model` |
+| `shared with N` | The same login is in several Bots; one fix clears all of them. | |
 
 ## Rules
 

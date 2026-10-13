@@ -21,7 +21,7 @@ Hermes already records the cause in each profile's login pool, config and cron j
 
 ## Checks
 
-Status: ✅ built · 🔜 next · 💡 later
+Status: ✅ built · 🔜 next · 💡 later. C1–C3 and D1 are fallback-aware: a working `fallback_model` turns a stop into a fallback and removes the no-backup risk.
 
 ### A. Is each login usable right now?
 | # | Check | Verdict | Fix | Status |
@@ -41,14 +41,14 @@ Status: ✅ built · 🔜 next · 💡 later
 ### C. Will the Bot actually be able to work?
 | # | Check | Verdict | Fix | Status |
 |---|---|---|---|---|
-| C1 | The Bot's **default model** uses a provider with no usable login (all benched, dead or missing). This is "no credentials found" and the collapsed picker. | **BOT CAN'T REACH ITS MODEL** | the fix for the blocking login, or add one | 🔜 |
-| C2 | A **cron job** uses a provider/model with no usable login | **CRON WILL FAIL** + job name + next run | the fix for the blocking login | 🔜 |
-| C3 | The provider the Bot depends on has **one login only** (nothing to rotate to) | **NO BACKUP** (info) | add a second login or a fallback model | 🔜 |
+| C1 | The Bot's **default model** uses a provider with no usable login (all benched, dead or missing). This is "no credentials found" and the collapsed picker. | **BOT CAN'T REACH ITS MODEL** | the fix for the blocking login, or add one | ✅ |
+| C2 | A **cron job** uses a provider/model with no usable login | **CRON WILL FAIL** + job name + next run | the fix for the blocking login | ✅ |
+| C3 | The provider the Bot depends on has **one login only** (nothing to rotate to) | **NO BACKUP** (info) | add a second login or a fallback model | ✅ |
 
 ### D. How far does one problem reach?
 | # | Check | Verdict | Fix | Status |
 |---|---|---|---|---|
-| D1 | The **same login shared** by several Bots: one bench hits all of them (seen live: one Codex login in 8 of 9 Bots) | **SHARED BY N BOTS** | one reset clears all | 🔜 |
+| D1 | The **same login shared** by several Bots: one bench hits all of them (seen live: one Codex login in 8 of 9 Bots) | **SHARED BY N BOTS** | one reset clears all | ✅ |
 | D2 | Bot Mode keys attached to the wrong Bot (#117325) | **WRONG BOT** | move it | 💡 |
 
 ### E. Proof and trend

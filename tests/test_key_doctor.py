@@ -56,5 +56,41 @@ class Alert(unittest.TestCase):
         self.assertIn("could not read", k.alert([{"profile": "nova", "error": "boom"}], NOW))
 
 
+def bot(profile, creds, verdict="ok", logins=1, covered=None, crons=()):
+    return {"profile": profile, "credentials": creds, "crons": list(crons),
+            "default_model": {"model": "gpt-6-astra", "provider": "openai-codex", "covered": covered,
+                              "reach": {"pool": "openai-codex", "logins": logins, "usable": 0 if verdict == "blocked" else logins, "blocking": ["281c14"] if verdict == "blocked" else [], "verdict": verdict}}}
+
+
+class BotLevel(unittest.TestCase):
+    def test_blocked_default_model_is_named(self):
+        self.assertIn("DEFAULT MODEL BLOCKED", k.model_line("gary", bot("gary", [], "blocked")["default_model"]))
+
+    def test_fallback_turns_a_stop_into_a_fallback(self):
+        cover = {"model": "claude-sonnet", "provider": "anthropic"}
+        line = k.model_line("gary", bot("gary", [], "blocked", covered=cover)["default_model"])
+        self.assertIn("fall back to claude-sonnet", line)
+        text = k.alert([bot("gary", [], "blocked", covered=cover)], NOW)
+        self.assertIn("running on fallback claude-sonnet", text)
+
+    def test_cron_that_will_fail_is_alerted(self):
+        job = {"name": "PR Babysitter", "next_run_at": "2026-10-14T08:00", "model": "gpt-6-astra", "provider": "openai-codex", "reach": {"verdict": "blocked"}}
+        self.assertIn("cron 'PR Babysitter' will fail", k.alert([bot("prbabysitter", [], crons=[job])], NOW))
+
+    def test_shared_login_is_one_risk_and_one_alert_line(self):
+        results = [bot(p, [cred(status="model-cooldown", model_cooldowns={"m": NOW + 60})], "no-backup") for p in ("default", "gary", "nova")]
+        k.mark_shared(results)
+        self.assertEqual(results[1]["credentials"][0]["shared_with"], ["default", "nova"])
+        self.assertEqual([sp["bots"] for sp in k.single_points(results)], [["default", "gary", "nova"]])
+        text = k.alert(results, NOW)
+        self.assertEqual(text.count("openai-codex (device_code)"), 1)
+        self.assertIn("+ 2 more Bots", text)
+
+    def test_fallback_removes_the_single_point(self):
+        results = [bot(p, [cred()], "no-backup", covered={"model": "x", "provider": "y"}) for p in ("a", "b")]
+        k.mark_shared(results)
+        self.assertEqual(k.single_points(results), [])
+
+
 if __name__ == "__main__":
     unittest.main()

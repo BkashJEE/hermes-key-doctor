@@ -29,6 +29,7 @@ def collect(profile: str | None = None) -> dict:
     k = _doctor()
     now = time.time()
     results = [k.read_profile(n, h) for n, h in k.profiles() if not profile or n == profile]
+    k.mark_shared(results)
     counts = {"ok": 0, "benched": 0, "dead": 0, "model-cooldown": 0, "stale": 0}
     for r in results:
         for c in r.get("credentials", []):
@@ -37,13 +38,22 @@ def collect(profile: str | None = None) -> dict:
             c["fix"] = k.fix_for(r["profile"], c)
             c["until_text"] = k.when(c["benched_until"], now) if c["benched_until"] else None
             c["cooldowns"] = [{"model": m, "until": t, "until_text": k.when(t, now), "stuck": t - now > 7 * 86400} for m, t in c["model_cooldowns"].items()]
+        dm = r.get("default_model")
+        if dm:
+            dm["line"] = k.model_line(r["profile"], dm)
+            dm["stopped"] = dm.get("reach", {}).get("verdict") == "blocked" and not dm.get("covered")
     total = sum(counts.values())
-    return {"checked_at": now, "profiles": results, "summary": {"logins": total, "bots": len(results), **counts, "attention": total - counts["ok"]}}
+    bots_stopped = sum(1 for r in results if (r.get("default_model") or {}).get("stopped"))
+    crons_failing = sum(len(k.blocked_crons(r)) for r in results)
+    return {"checked_at": now, "profiles": results, "risks": k.single_points(results),
+            "summary": {"logins": total, "bots": len(results), **counts, "bots_stopped": bots_stopped, "crons_failing": crons_failing,
+                        "crons": sum(len(r.get("crons", [])) for r in results), "attention": total - counts["ok"] + bots_stopped + crons_failing}}
 
 
 def text_report(profile: str | None = None) -> str:
     k = _doctor()
     results = [k.read_profile(n, h) for n, h in k.profiles() if not profile or n == profile]
+    k.mark_shared(results)
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         k.report(results, time.time())
@@ -69,7 +79,9 @@ def handle_cli(args) -> None:
             sys.stdout.write(json.dumps(collect(only), separators=(",", ":"), default=str) + "\n")
         elif getattr(args, "alert", False):
             k = _doctor()
-            text = k.alert([k.read_profile(n, h) for n, h in k.profiles() if not only or n == only], time.time())
+            results = [k.read_profile(n, h) for n, h in k.profiles() if not only or n == only]
+            k.mark_shared(results)
+            text = k.alert(results, time.time())
             if text:
                 print(text)
         else:

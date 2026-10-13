@@ -140,7 +140,9 @@ function Login({ c }) {
           jsx('span', { style: { fontFamily: MONO, color: C.t1 }, children: c.provider }),
           jsx('span', { style: { color: C.t3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: maskLabel(c.label) }),
           jsx('span', { style: { fontFamily: MONO, fontSize: 10.5, color: C.t4 }, children: c.auth_type }),
-          jsx(Pill, { k }),
+          jsxs('span', { style: { display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }, children: [
+            problem && c.shared_with && c.shared_with.length ? jsx('span', { title: `Also used by: ${c.shared_with.join(', ')}`, style: { fontFamily: MONO, fontSize: 10, color: C.t3, border: `1px solid ${C.stroke}`, borderRadius: 4, padding: '1px 6px' }, children: `shared ×${c.shared_with.length + 1}` }) : null,
+            jsx(Pill, { k })] }),
         ],
       }),
       problem ? jsxs('div', {
@@ -151,6 +153,7 @@ function Login({ c }) {
           k === 'stale' ? jsx('div', { children: 'Marked exhausted, but the bench time has passed. A reset makes sure Hermes retries it.' }) : null,
           k === 'dead' ? jsx('div', { children: 'The provider rejected this login outright.' }) : null,
           c.fix ? jsx(CopyFix, { text: c.fix }) : null,
+          c.fix && c.shared_with && c.shared_with.length ? jsx('div', { style: { color: C.t3, marginTop: 4 }, children: `Shared with ${c.shared_with.length} other Bot${c.shared_with.length === 1 ? '' : 's'}: one fix clears all of them.` }) : null,
         ],
       }) : null,
     ],
@@ -159,7 +162,7 @@ function Login({ c }) {
 
 function Bot({ p }) {
   const creds = p.credentials || []
-  const bad = creds.filter((c) => stateOf(c) !== 'ok').length
+  const bad = creds.filter((c) => stateOf(c) !== 'ok').length + (p.default_model && p.default_model.stopped ? 1 : 0) + (p.crons || []).filter((j) => j.reach && j.reach.verdict === 'blocked').length
   return jsxs('div', {
     style: { background: C.panel, border: `1px solid ${bad ? C.red : C.stroke}`, borderRadius: 10, padding: '10px 14px' },
     children: [
@@ -171,9 +174,22 @@ function Bot({ p }) {
           jsx('span', { style: { marginLeft: 'auto', fontSize: 11, fontWeight: 600, color: p.error ? C.red : bad ? C.red : C.green }, children: p.error ? 'unreadable' : bad ? `${bad} need attention` : 'all healthy' }),
         ],
       }),
+      p.default_model && p.default_model.line ? jsx('div', {
+        style: { fontSize: 11.5, margin: '2px 0 4px', color: p.default_model.stopped ? C.red : p.default_model.reach && p.default_model.reach.verdict === 'no-backup' && !p.default_model.covered ? C.orange : C.t3 },
+        children: p.default_model.line.replace(/^DEFAULT MODEL BLOCKED: /, 'Default model blocked: ').replace(/^default model /, 'Model ') }) : null,
+      ...(p.crons || []).filter((j) => j.reach && j.reach.verdict === 'blocked').map((j) => jsx('div', { style: { fontSize: 11.5, color: C.red, marginBottom: 4 }, children: `Cron "${j.name}" will fail (next ${j.next_run_at ? new Date(j.next_run_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '?'})` }, j.id)),
       p.error ? jsx('div', { style: { color: C.red, fontSize: 11.5 }, children: p.error }) : creds.map((c) => jsx(Login, { c }, `${c.provider}-${c.id}`)),
     ],
   })
+}
+
+function attentionParts(sum) {
+  const logins = sum.attention - (sum.bots_stopped || 0) - (sum.crons_failing || 0)
+  return [
+    logins ? `${logins} login${logins === 1 ? '' : 's'}` : null,
+    sum.bots_stopped ? `${sum.bots_stopped} Bot${sum.bots_stopped === 1 ? " that can't reach its model" : "s that can't reach their model"}` : null,
+    sum.crons_failing ? `${sum.crons_failing} cron job${sum.crons_failing === 1 ? '' : 's'} that will fail` : null,
+  ].filter(Boolean).join(' · ')
 }
 
 function KeysPage() {
@@ -216,8 +232,13 @@ function KeysPage() {
         style: { margin: '12px 0', padding: '10px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600,
           color: healthy ? C.green : C.red, background: healthy ? tint('--ui-green', '#3fb950', 10) : tint('--ui-red', '#ff7b72', 10),
           border: `1px solid ${healthy ? tint('--ui-green', '#3fb950', 35) : C.red}` },
-        children: healthy ? `All ${sum.logins} logins across ${sum.bots} Bots are healthy. Hermes can use every one.` : `${sum.attention} login${sum.attention === 1 ? '' : 's'} need attention. Each one shows why, until when, and the fix.`,
+        children: healthy ? `All ${sum.logins} logins across ${sum.bots} Bots are healthy, every default model is reachable, and ${sum.crons} active cron job${sum.crons === 1 ? '' : 's'} can run.` : `Needs attention: ${attentionParts(sum)}. Each one shows why, until when, and the fix.`,
       }),
+      ...(d.risks || []).map((r) => jsxs('div', {
+        style: { marginBottom: 12, padding: '10px 14px', borderRadius: 10, fontSize: 12.5, color: C.orange, background: tint('--ui-orange', '#ffa657', 9), border: `1px solid ${tint('--ui-orange', '#ffa657', 40)}` },
+        children: [jsx('b', { children: `Risk: ${r.bots.length} Bots depend on one ${r.provider} login with no backup. ` }),
+          `One rate limit on it stops all ${r.bots.length} (${r.bots.join(', ')}). Add a second login or a fallback model.`],
+      }, `${r.provider}-${r.id}`)),
       jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 12 },
         children: d.profiles.map((p) => jsx(Bot, { p }, p.profile)) }),
       jsx('div', { style: { marginTop: 14, fontSize: 11, color: C.t4, lineHeight: 1.6 },
@@ -234,7 +255,7 @@ function StatusChip() {
   return jsx('button', {
     type: 'button', title: 'Open Key Doctor', onClick: () => host.navigate(ROUTE),
     style: { background: 'transparent', border: 0, cursor: 'pointer', padding: '0 6px', fontSize: 11, color: bad ? C.red : C.green, fontFamily: MONO },
-    children: bad ? `⚿ ${bad} key${bad === 1 ? '' : 's'} need${bad === 1 ? 's' : ''} attention` : `⚿ ${sum.logins} keys ok`,
+    children: sum.bots_stopped ? `⚿ ${sum.bots_stopped} Bot${sum.bots_stopped === 1 ? '' : 's'} can't reach a model` : bad ? `⚿ ${bad} need${bad === 1 ? 's' : ''} attention` : `⚿ ${sum.logins} keys ok`,
   })
 }
 

@@ -57,6 +57,7 @@ def inspect_one() -> dict:
     now = time.time()
     pools = read_credential_pool() or {}
     out = []
+    by_pool: dict[str, list] = {}
     for provider, raw_entries in sorted(pools.items()):
         entries = [cp.PooledCredential.from_dict(provider, raw) for raw in (raw_entries or []) if isinstance(raw, dict)]
         live = [e for e in entries if e.last_status != cp.STATUS_DEAD]
@@ -74,7 +75,63 @@ def inspect_one() -> dict:
                 "stale_bench": e.last_status == cp.STATUS_EXHAUSTED and not benched,
                 "model_cooldowns": cooled, "sole_credential": len(live) == 1,
             })
-    return {"credentials": out}
+            by_pool.setdefault(provider, []).append((e, benched))
+
+    def reach(provider: str | None, base_url: str | None, model: str | None) -> dict:
+        """Can a request for this model on this provider find a usable login right now?"""
+        provider = (provider or "").strip()
+        if not provider:
+            return {"verdict": "unknown", "reason": "no provider set"}
+        try:
+            key = cp.resolve_runtime_pool_key(provider, base_url) or provider.lower()
+        except Exception:
+            key = provider.lower()
+        entries = by_pool.get(key, [])
+        if not entries:
+            # Nothing pooled: Hermes may still use a key from .env/config or a provider sign-in. Not a red flag.
+            return {"pool": key, "logins": 0, "usable": 0, "verdict": "unpooled"}
+        usable, blocking = [], []
+        for e, benched in entries:
+            until = model_cooldown_until(e, model) if model else None
+            if e.last_status == cp.STATUS_DEAD or benched or (until and until > now):
+                blocking.append(e.id)
+            else:
+                usable.append(e.id)
+        verdict = "blocked" if not usable else "no-backup" if len(entries) == 1 else "ok"
+        return {"pool": key, "logins": len(entries), "usable": len(usable), "blocking": blocking, "verdict": verdict}
+
+    model_cfg: dict = {}
+    fallback_cfg: list = []
+    try:
+        from hermes_cli.config import load_config  # noqa: E402
+        config = load_config()
+        raw = config.get("model")
+        model_cfg = raw if isinstance(raw, dict) else {"default": raw}
+        fb = config.get("fallback_model")  # a single dict or a chain (list of dicts)
+        fallback_cfg = [x for x in (fb if isinstance(fb, list) else [fb]) if isinstance(x, dict)]
+    except Exception:
+        model_cfg = {}
+    default = {"model": model_cfg.get("default"), "provider": model_cfg.get("provider"), "base_url": model_cfg.get("base_url")}
+    default["reach"] = reach(default["provider"], default["base_url"], default["model"])
+    default["fallbacks"] = [{"model": f.get("model"), "provider": f.get("provider"), "reach": reach(f.get("provider"), f.get("base_url"), f.get("model"))} for f in fallback_cfg]
+    default["covered"] = next((f for f in default["fallbacks"] if f["reach"]["verdict"] in ("ok", "no-backup", "unpooled")), None)
+
+    crons = []
+    jobs_file = Path(os.environ["HERMES_HOME"]) / "cron" / "jobs.json"
+    try:
+        raw_jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+        jobs = raw_jobs.get("jobs", []) if isinstance(raw_jobs, dict) else raw_jobs
+    except (OSError, ValueError):
+        jobs = []
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict) or job.get("enabled") is False or job.get("paused_at") or job.get("no_agent"):
+            continue  # paused, disabled, or a script-only job that never calls a model
+        provider = job.get("provider") or default["provider"]
+        base_url = job.get("base_url") if job.get("provider") else default["base_url"]
+        model = job.get("model") or default["model"]
+        crons.append({"id": job.get("id"), "name": job.get("name") or job.get("id"), "next_run_at": job.get("next_run_at"),
+                      "model": model, "provider": provider, "reach": reach(provider, base_url, model)})
+    return {"credentials": out, "default_model": default, "crons": crons}
 
 
 def read_profile(name: str, home: Path) -> dict:
@@ -84,6 +141,56 @@ def read_profile(name: str, home: Path) -> dict:
     if run.returncode != 0:
         return {"profile": name, "error": (run.stderr.strip().splitlines() or ["unreadable"])[-1]}
     return {"profile": name, **json.loads(run.stdout)}
+
+
+def mark_shared(results: list[dict]) -> None:
+    """The same pooled login (provider + id) in several profiles: one bench hits every one of them."""
+    seen: dict[tuple, list] = {}
+    for r in results:
+        for c in r.get("credentials", []):
+            seen.setdefault((c["provider"], c["id"]), []).append(r["profile"])
+    for r in results:
+        for c in r.get("credentials", []):
+            c["shared_with"] = [p for p in seen[(c["provider"], c["id"])] if p != r["profile"]]
+
+
+def model_line(profile: str, d: dict) -> str | None:
+    """One line on whether the Bot's default model can be reached, or None when nothing is set."""
+    if not d or not d.get("provider"):
+        return None
+    r = d["reach"]
+    what = f"{d.get('model') or '?'} via {d['provider']}"
+    cover = d.get("covered")
+    if r["verdict"] == "blocked" and cover:
+        return f"default model {what} BLOCKED; Hermes will fall back to {cover['model']} via {cover['provider']}"
+    if r["verdict"] == "no-backup" and cover:
+        return f"default model {what}: ok, one login, covered by fallback {cover['model']} via {cover['provider']}"
+    if r["verdict"] == "blocked":
+        return f"DEFAULT MODEL BLOCKED: {what} — none of {r['logins']} login(s) usable ({', '.join(r['blocking'])}); this is 'no credentials found'"
+    if r["verdict"] == "no-backup":
+        return f"default model {what}: ok, but only one login (no backup if it gets benched)"
+    if r["verdict"] == "unpooled":
+        return f"default model {what}: no pooled login (Hermes may use a key from .env or a sign-in)"
+    return f"default model {what}: ok ({r['usable']} of {r['logins']} logins usable)"
+
+
+def single_points(results: list[dict]) -> list[dict]:
+    """Logins that several Bots' default models depend on with no second login to rotate to."""
+    deps: dict[tuple, dict] = {}
+    for r in results:
+        d = r.get("default_model") or {}
+        reach = d.get("reach") or {}
+        if reach.get("verdict") not in ("no-backup", "blocked") or reach.get("logins") != 1 or d.get("covered"):
+            continue
+        cred = next((c for c in r.get("credentials", []) if c["provider"].lower() == reach.get("pool")), None)
+        if cred:
+            item = deps.setdefault((cred["provider"], cred["id"]), {"provider": cred["provider"], "id": cred["id"], "label": cred["label"], "bots": []})
+            item["bots"].append(r["profile"])
+    return [v for v in deps.values() if len(v["bots"]) > 1]
+
+
+def blocked_crons(r: dict) -> list[dict]:
+    return [c for c in r.get("crons", []) if c["reach"].get("verdict") == "blocked"]
 
 
 def fix_for(profile: str, c: dict) -> str | None:
@@ -121,6 +228,10 @@ def report(results: list[dict], now: float) -> int:
         creds = r["credentials"]
         bad = [c for c in creds if c["status"] != "ok" or c["stale_bench"]]
         print(f"\n{r['profile']}: {len(creds)} credential(s), {len(bad)} need attention")
+        if line := model_line(r["profile"], r.get("default_model")):
+            print(f"  {line}")
+        for job in blocked_crons(r):
+            print(f"  CRON WILL FAIL: {job['name']} (next {job['next_run_at'] or '?'}) — {job['model']} via {job['provider']} has no usable login")
         for c in creds:
             mark = {"ok": "ok ", "benched": "BENCHED", "dead": "DEAD", "model-cooldown": "MODEL COOLDOWN"}[c["status"]]
             print(f"  {mark:<14} {c['provider']:<16} {c['label'][:28]:<28} {c['auth_type']:<7} id={c['id']}")
@@ -134,21 +245,38 @@ def report(results: list[dict], now: float) -> int:
                 print(f"                 provider said: {c['error_message']}")
             if fix := fix_for(r["profile"], c):
                 print(f"                 fix: {fix}")
-        trouble += len(bad)
+                if c.get("shared_with"):
+                    print(f"                 shared with {len(c['shared_with'])} other Bot(s) ({', '.join(c['shared_with'])}): one fix clears all of them")
+        dm = r.get("default_model") or {}
+        trouble += len(bad) + len(blocked_crons(r)) + (1 if dm.get("reach", {}).get("verdict") == "blocked" and not dm.get("covered") else 0)
     total = sum(len(r.get("credentials", [])) for r in results)
-    print(f"\nChecked {total} credential(s) across {len(results)} profile(s): {trouble} benched, dead or cooling down.")
+    for sp in single_points(results):
+        print(f"\nRISK: {len(sp['bots'])} Bots run their default model on one {sp['provider']} login ({sp['id']}) with no backup:"
+              f" {', '.join(sp['bots'])}. One rate limit on it stops all {len(sp['bots'])}. Add a second login or a fallback model.")
+    crons = sum(len(r.get("crons", [])) for r in results)
+    print(f"\nChecked {total} credential(s), {len(results)} default model(s) and {crons} active cron job(s) across {len(results)} profile(s): {trouble} need attention.")
     return 1 if trouble else 0
 
 
 def alert(results: list[dict], now: float) -> str:
     """Short Telegram text for a watchdog cron: empty when every credential is healthy."""
     lines = []
+    told: set = set()
     for r in results:
         if "error" in r:
             lines.append(f"• {r['profile']}: could not read ({r['error']})"); continue
+        d = r.get("default_model") or {}
+        if d.get("reach", {}).get("verdict") == "blocked":
+            cover = d.get("covered")
+            lines.append(f"• {r['profile']}: default model {d.get('model')} via {d.get('provider')} is blocked" + (f"; running on fallback {cover['model']}" if cover else "; the Bot can't answer"))
+        for job in blocked_crons(r):
+            lines.append(f"• {r['profile']}: cron '{job['name']}' will fail (next {job['next_run_at'] or '?'}): no usable {job['provider']} login")
         for c in r["credentials"]:
             if c["status"] == "ok" and not c["stale_bench"]:
                 continue
+            if (c["provider"], c["id"]) in told:
+                continue  # a shared login is reported once, with every Bot it affects
+            told.add((c["provider"], c["id"]))
             if c["status"] == "benched":
                 what = f"BENCHED, {why(c)}, until {when(c.get('benched_until'), now)}"
             elif c["status"] == "dead":
@@ -157,7 +285,8 @@ def alert(results: list[dict], now: float) -> str:
                 what = "blocked for " + ", ".join(f"{m} until {when(t, now)}" for m, t in c["model_cooldowns"].items())
             else:
                 what = "marked exhausted, bench time passed"
-            lines.append(f"• {r['profile']} · {c['provider']} ({c['label'][:24]}): {what}\n  fix: {fix_for(r['profile'], c)}")
+            who = r["profile"] + (f" + {len(c.get('shared_with', []))} more Bots" if c.get("shared_with") else "")
+            lines.append(f"• {who} · {c['provider']} ({c['label'][:24]}): {what}\n  fix: {fix_for(r['profile'], c)}" + ("  (one fix clears all)" if c.get("shared_with") else ""))
     if not lines:
         return ""
     return f"Key Doctor: {len(lines)} Hermes login(s) need attention\n" + "\n".join(lines)
@@ -176,6 +305,7 @@ def main() -> int:
     if not targets:
         print(f"No profile named {args.profile}."); return 2
     results = [read_profile(n, h) for n, h in targets]
+    mark_shared(results)
     if args.alert:
         text = alert(results, time.time())
         if text:

@@ -1,6 +1,6 @@
 // Test harness only: mimics the parts of @hermes/plugin-sdk that hermes-key-doctor uses.
 // ?state=before shows the state Key Doctor found on 2026-10-12; default is the live reading saved after the reset.
-const state = new URLSearchParams(location.search).get('state') === 'before' ? 'before' : 'after'
+const state = (['before', 'bench'].includes(new URLSearchParams(location.search).get('state')) ? new URLSearchParams(location.search).get('state') : 'after')
 const payload = await fetch(`./${state}.json`).then((r) => r.json())
 export const ROUTES_AREA = 'routes', SIDEBAR_NAV_AREA = 'sidebar.nav', PALETTE_AREA = 'palette', STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }
 export const host = {
