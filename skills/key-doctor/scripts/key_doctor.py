@@ -47,6 +47,64 @@ def when(epoch: float | None, now: float) -> str | None:
     return f"{stamp} (in {hours}h {rest // 60}m)" if hours else f"{stamp} (in {rest // 60}m)"
 
 
+EXPIRY_WARN_S = 24 * 3600  # A5: warn this long before an OAuth login with no refresh token runs out
+
+
+def epoch_of(value) -> float | None:
+    """expires_at may be an ISO string, epoch seconds or epoch ms; None when unknown."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / (1000.0 if value > 1e12 else 1.0)
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        try:
+            v = float(value)
+            return v / (1000.0 if v > 1e12 else 1.0)
+        except ValueError:
+            return None
+
+
+def anthropic_family(token: str) -> str | None:
+    """Which kind of Anthropic secret this is, from its prefix alone (the token is never kept or printed)."""
+    t = (token or "").strip()
+    if not t:
+        return None
+    if t.startswith("sk-ant-api"):
+        return "console key (sk-ant-api)"
+    for pre in ("sk-ant-usr-", "sk-ant-svc-", "sk-ant-admin"):
+        if t.startswith(pre):
+            return f"console key ({pre.rstrip('-')})"
+    if t.startswith("sk-ant-oat"):
+        return "subscription OAuth (sk-ant-oat)"
+    if t.startswith("eyJ"):
+        return "OAuth token (JWT)"
+    if t.startswith("cc-"):
+        return "Claude Code token (cc-)"
+    if t.startswith("sk-ant-"):
+        return "anthropic key (other sk-ant-)"
+    return "unrecognised format"
+
+
+def env_names(home: Path) -> set[str]:
+    """Names of non-empty variables in a profile's .env. Values are never read past the '='."""
+    names = set()
+    try:
+        for line in (home / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.replace("export ", "").strip()
+            if v.strip().strip('"').strip("'"):
+                names.add(k)
+    except OSError:
+        pass
+    return names
+
+
 def inspect_one() -> dict:
     """Runs inside a child process whose HERMES_HOME is the profile being read."""
     sys.path.insert(0, str(AGENT))
@@ -65,8 +123,28 @@ def inspect_one() -> dict:
             until = cp._exhausted_until(e, sole_credential=len(live) == 1)
             benched = e.last_status == cp.STATUS_EXHAUSTED and bool(until and until > now)
             cooled = {m: t for m in (e.model_cooldowns or {}) if (t := model_cooldown_until(e, m)) and t > now}
+            # A5: an OAuth login with no refresh token cannot renew itself; warn before it runs out.
+            exp = epoch_of(e.expires_at) or epoch_of(e.expires_at_ms)
+            renewable = bool((e.refresh_token or "").strip())
+            expiry = None
+            if e.auth_type == cp.AUTH_TYPE_OAUTH and exp:
+                state = "expired" if exp <= now else "expiring" if exp - now <= EXPIRY_WARN_S else "ok"
+                expiry = {"expires_at": exp, "renewable": renewable, "state": state if not renewable else "renews"}
+            # B1: what Hermes itself will send an Anthropic secret as (its own classifier), vs. what it is.
+            auth_mode = None
+            if provider == "anthropic" and (e.access_token or "").strip():
+                fam = anthropic_family(e.access_token)
+                try:
+                    from agent.anthropic_credentials import _is_oauth_token  # noqa: E402
+                    sent_as = "oauth" if _is_oauth_token(e.access_token) else "api_key"
+                except Exception:
+                    sent_as = None
+                console = bool(fam and fam.startswith("console key"))
+                auth_mode = {"family": fam, "sent_as": sent_as, "stored_as": e.auth_type,
+                             "mismatch": bool(console and sent_as == "oauth")}
             out.append({
                 "provider": provider, "id": e.id, "label": e.label, "auth_type": e.auth_type, "source": e.source,
+                "expiry": expiry, "auth_mode": auth_mode,
                 "status": "dead" if e.last_status == cp.STATUS_DEAD else "benched" if benched else "ok" if not cooled else "model-cooldown",
                 "last_status": e.last_status, "error_code": e.last_error_code, "error_reason": e.last_error_reason,
                 "failure_reason": (e.extra or {}).get("failure_reason") or getattr(e, "failure_reason", None),
@@ -131,7 +209,11 @@ def inspect_one() -> dict:
         model = job.get("model") or default["model"]
         crons.append({"id": job.get("id"), "name": job.get("name") or job.get("id"), "next_run_at": job.get("next_run_at"),
                       "model": model, "provider": provider, "reach": reach(provider, base_url, model)})
-    return {"credentials": out, "default_model": default, "crons": crons}
+    # B1b (#97085): an ANTHROPIC_API_KEY in .env can take over from a subscription login and bill the paid API.
+    home = Path(os.environ["HERMES_HOME"])
+    has_sub = any(c["provider"] == "anthropic" and c["auth_type"] == cp.AUTH_TYPE_OAUTH for c in out)
+    env_shadow = "ANTHROPIC_API_KEY" in env_names(home) and has_sub
+    return {"credentials": out, "default_model": default, "crons": crons, "env_shadow": env_shadow}
 
 
 def read_profile(name: str, home: Path) -> dict:
@@ -193,9 +275,49 @@ def blocked_crons(r: dict) -> list[dict]:
     return [c for c in r.get("crons", []) if c["reach"].get("verdict") == "blocked"]
 
 
+# One verdict per login, worst first; the CLI report, the alert, --json and the Desktop page all use it.
+STATES = ("dead", "benched", "expired", "wrong-auth-mode", "model-cooldown", "expiring", "stale", "ok")
+
+
+def state_of(c: dict) -> str:
+    if c["status"] in ("dead", "benched"):
+        return c["status"]
+    exp = (c.get("expiry") or {}).get("state")
+    if exp == "expired":
+        return "expired"
+    if (c.get("auth_mode") or {}).get("mismatch"):
+        return "wrong-auth-mode"
+    if c["status"] == "model-cooldown":
+        return "model-cooldown"
+    if exp == "expiring":
+        return "expiring"
+    if c["stale_bench"]:
+        return "stale"
+    return "ok"
+
+
+def note_for(c: dict, now: float) -> str | None:
+    """Plain-language line for the two newer checks (A5 expiry, B1 auth mode)."""
+    st = state_of(c)
+    e = c.get("expiry") or {}
+    if st in ("expired", "expiring"):
+        return (f"OAuth login {'expired' if st == 'expired' else 'expires'} {when(e.get('expires_at'), now)}"
+                " and has no refresh token, so it cannot renew itself")
+    if st == "wrong-auth-mode":
+        m = c["auth_mode"]
+        return (f"this is a {m['family']}, but this Hermes sends it as OAuth (Bearer). Anthropic then answers"
+                " 'credit balance too low' even though the key is fine (NousResearch/hermes-agent#133856)")
+    return None
+
 def fix_for(profile: str, c: dict) -> str | None:
     # Always explicit: a plain `hermes` follows ~/.hermes/active_profile, which may not be "default".
     flag = f"-p {profile} "
+    st = state_of(c)
+    if st in ("expired", "expiring"):
+        return f"hermes {flag}auth add {c['provider']} --type oauth   # sign in again; then: hermes {flag}auth remove {c['provider']} {c['id']}"
+    if st == "wrong-auth-mode":
+        return (f"hermes {flag}auth add anthropic --type api-key   # with a standard sk-ant-api key from the Console;"
+                f" then: hermes {flag}auth remove anthropic {c['id']}")
     if c["model_cooldowns"] and c["status"] != "benched":
         return f"hermes {flag}auth reset {c['provider']} {c['id']}   # clears the model cooldowns on this credential"
     if c["status"] == "benched" or c["stale_bench"]:
@@ -226,17 +348,23 @@ def report(results: list[dict], now: float) -> int:
         if "error" in r:
             print(f"\n{r['profile']}: could not read ({r['error']})"); continue
         creds = r["credentials"]
-        bad = [c for c in creds if c["status"] != "ok" or c["stale_bench"]]
+        bad = [c for c in creds if state_of(c) != "ok"]
         print(f"\n{r['profile']}: {len(creds)} credential(s), {len(bad)} need attention")
         if line := model_line(r["profile"], r.get("default_model")):
             print(f"  {line}")
+        if r.get("env_shadow"):
+            print("  NOTE: ANTHROPIC_API_KEY is set in this Bot's .env next to a subscription login; Hermes can pick the paid key"
+                  " and bill the API instead of your subscription (NousResearch/hermes-agent#97085). Remove it from .env if that is not what you want.")
         for job in blocked_crons(r):
             print(f"  CRON WILL FAIL: {job['name']} (next {job['next_run_at'] or '?'}) — {job['model']} via {job['provider']} has no usable login")
         for c in creds:
-            mark = {"ok": "ok ", "benched": "BENCHED", "dead": "DEAD", "model-cooldown": "MODEL COOLDOWN"}[c["status"]]
+            mark = {"ok": "ok ", "benched": "BENCHED", "dead": "DEAD", "model-cooldown": "MODEL COOLDOWN", "expired": "EXPIRED",
+                    "expiring": "EXPIRING", "wrong-auth-mode": "WRONG AUTH MODE", "stale": "STALE BENCH"}[state_of(c)]
             print(f"  {mark:<14} {c['provider']:<16} {c['label'][:28]:<28} {c['auth_type']:<7} id={c['id']}")
             if c["status"] == "benched":
                 print(f"                 why: {why(c)}; until {when(c['benched_until'], now)}" + (" — the only credential for this provider" if c["sole_credential"] else ""))
+            if note := note_for(c, now):
+                print(f"                 {note}")
             if c["stale_bench"]:
                 print("                 marked exhausted, bench time has passed; Hermes should retry it, a reset makes sure")
             for model, until in c["model_cooldowns"].items():
@@ -272,7 +400,7 @@ def alert(results: list[dict], now: float) -> str:
         for job in blocked_crons(r):
             lines.append(f"• {r['profile']}: cron '{job['name']}' will fail (next {job['next_run_at'] or '?'}): no usable {job['provider']} login")
         for c in r["credentials"]:
-            if c["status"] == "ok" and not c["stale_bench"]:
+            if state_of(c) == "ok":
                 continue
             if (c["provider"], c["id"]) in told:
                 continue  # a shared login is reported once, with every Bot it affects
@@ -281,6 +409,8 @@ def alert(results: list[dict], now: float) -> str:
                 what = f"BENCHED, {why(c)}, until {when(c.get('benched_until'), now)}"
             elif c["status"] == "dead":
                 what = "DEAD, the provider rejected it"
+            elif state_of(c) in ("expired", "expiring", "wrong-auth-mode"):
+                what = state_of(c).replace("-", " ").upper() + ": " + note_for(c, now)
             elif c["status"] == "model-cooldown":
                 what = "blocked for " + ", ".join(f"{m} until {when(t, now)}" for m, t in c["model_cooldowns"].items())
             else:

@@ -30,12 +30,12 @@ Status: ✅ built · 🔜 next · 💡 later. C1–C3 and D1 are fallback-aware:
 | A2 | One model blocked on a working login (`model_cooldowns`) | **MODEL BLOCKED** + model + until when; over 7 days = stuck-cooldown bug (#127917) | `auth reset` | ✅ |
 | A3 | Provider rejected it outright (`last_status=dead`) | **DEAD** | remove and add again | ✅ |
 | A4 | Marked exhausted but the time passed | **STALE BENCH** | `auth reset` | ✅ |
-| A5 | OAuth token expired or expiring within 24 h, or no refresh token to renew it | **EXPIRING / EXPIRED** + when | `auth refresh` / sign in again | 🔜 |
+| A5 | OAuth token expired or expiring within 24 h, or no refresh token to renew it | **EXPIRING / EXPIRED** + when | `auth refresh` / sign in again | ✅ |
 
 ### B. Is the login the right kind?
 | # | Check | Verdict | Fix | Status |
 |---|---|---|---|---|
-| B1 | Anthropic key shape vs. auth mode: a Console key (`sk-ant-api…`) stored or used as OAuth, or an OAuth token stored as an API key. This is the "credit balance too low on a valid key" report (#136687). | **WRONG AUTH MODE** | re-add with the right type | 🔜 |
+| B1 | Anthropic key shape vs. auth mode: a Console key (`sk-ant-api…`) stored or used as OAuth, or an OAuth token stored as an API key. This is the "credit balance too low on a valid key" report (#136687). | **WRONG AUTH MODE** | re-add with the right type | ✅ |
 | B2 | Custom endpoint login that no longer matches the provider's `base_url` | **POINTS ELSEWHERE** | re-add for that endpoint | 💡 |
 
 ### C. Will the Bot actually be able to work?

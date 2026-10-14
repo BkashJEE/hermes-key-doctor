@@ -89,8 +89,11 @@ const STATE = {
   dead: { label: 'DEAD', fg: '#fff', bg: C.red },
   'model-cooldown': { label: 'MODEL BLOCKED', fg: C.orange, bg: tint('--ui-orange', '#ffa657', 16) },
   stale: { label: 'STALE BENCH', fg: C.yellow, bg: tint('--ui-yellow', '#d29922', 14) },
+  expired: { label: 'EXPIRED', fg: '#fff', bg: C.red },
+  expiring: { label: 'EXPIRING', fg: C.yellow, bg: tint('--ui-yellow', '#d29922', 14) },
+  'wrong-auth-mode': { label: 'WRONG AUTH MODE', fg: '#fff', bg: C.red },
 }
-const stateOf = (c) => (c.status === 'ok' && c.stale_bench ? 'stale' : c.status)
+const stateOf = (c) => c.state || (c.status === 'ok' && c.stale_bench ? 'stale' : c.status)
 // Labels are often the account email; mask them so a screenshot or a screen recording never shows one.
 const maskLabel = (label) => String(label || '').replace(/([A-Za-z0-9])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, '$1•••@$2')
 
@@ -150,6 +153,7 @@ function Login({ c }) {
         children: [
           c.why ? jsx('div', { children: `Why: ${c.why}${c.until_text ? ` · until ${c.until_text}` : ''}${c.sole_credential ? ' · the only login for this provider' : ''}` }) : null,
           ...(c.cooldowns || []).map((m) => jsx('div', { style: { color: m.stuck ? C.orange : C.t2 }, children: `${m.model} blocked until ${m.until_text}${m.stuck ? ' · longer than any rate limit (stuck-cooldown bug, hermes-agent#127917)' : ''}` }, m.model)),
+          c.note ? jsx('div', { children: c.note }) : null,
           k === 'stale' ? jsx('div', { children: 'Marked exhausted, but the bench time has passed. A reset makes sure Hermes retries it.' }) : null,
           k === 'dead' ? jsx('div', { children: 'The provider rejected this login outright.' }) : null,
           c.fix ? jsx(CopyFix, { text: c.fix }) : null,
@@ -177,6 +181,7 @@ function Bot({ p }) {
       p.default_model && p.default_model.line ? jsx('div', {
         style: { fontSize: 11.5, margin: '2px 0 4px', color: p.default_model.stopped ? C.red : p.default_model.reach && p.default_model.reach.verdict === 'no-backup' && !p.default_model.covered ? C.orange : C.t3 },
         children: p.default_model.line.replace(/^DEFAULT MODEL BLOCKED: /, 'Default model blocked: ').replace(/^default model /, 'Model ') }) : null,
+      p.env_shadow ? jsx('div', { style: { fontSize: 11.5, color: C.orange, marginBottom: 4 }, children: "ANTHROPIC_API_KEY in this Bot's .env can take over from its subscription login and bill the paid API (hermes-agent#97085). Remove it from .env if that's not what you want." }) : null,
       ...(p.crons || []).filter((j) => j.reach && j.reach.verdict === 'blocked').map((j) => jsx('div', { style: { fontSize: 11.5, color: C.red, marginBottom: 4 }, children: `Cron "${j.name}" will fail (next ${j.next_run_at ? new Date(j.next_run_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '?'})` }, j.id)),
       p.error ? jsx('div', { style: { color: C.red, fontSize: 11.5 }, children: p.error }) : creds.map((c) => jsx(Login, { c }, `${c.provider}-${c.id}`)),
     ],

@@ -30,10 +30,12 @@ def collect(profile: str | None = None) -> dict:
     now = time.time()
     results = [k.read_profile(n, h) for n, h in k.profiles() if not profile or n == profile]
     k.mark_shared(results)
-    counts = {"ok": 0, "benched": 0, "dead": 0, "model-cooldown": 0, "stale": 0}
+    counts = {s: 0 for s in k.STATES}
     for r in results:
         for c in r.get("credentials", []):
-            counts["stale" if c["stale_bench"] and c["status"] == "ok" else c["status"]] += 1
+            c["state"] = k.state_of(c)
+            c["note"] = k.note_for(c, now)
+            counts[c["state"]] += 1
             c["why"] = k.why(c) if c["status"] == "benched" else None
             c["fix"] = k.fix_for(r["profile"], c)
             c["until_text"] = k.when(c["benched_until"], now) if c["benched_until"] else None

@@ -92,5 +92,59 @@ class BotLevel(unittest.TestCase):
         self.assertEqual(k.single_points(results), [])
 
 
+class ExpiryAndAuthMode(unittest.TestCase):
+    """A5 (OAuth logins that cannot renew) and B1 (Anthropic key sent the wrong way, #133856 / #136687)."""
+
+    def test_epoch_of_reads_iso_seconds_and_ms(self):
+        self.assertAlmostEqual(k.epoch_of("2026-10-14T12:00:00+00:00"), 1791979200.0)
+        self.assertEqual(k.epoch_of(1791979200), 1791979200.0)
+        self.assertEqual(k.epoch_of(1791979200000), 1791979200.0)
+        self.assertIsNone(k.epoch_of(None))
+        self.assertIsNone(k.epoch_of("not a date"))
+
+    def test_expired_login_without_refresh_token(self):
+        c = cred(expiry={"expires_at": NOW - 60, "renewable": False, "state": "expired"})
+        self.assertEqual(k.state_of(c), "expired")
+        self.assertIn("cannot renew itself", k.note_for(c, NOW))
+        self.assertTrue(k.fix_for("gary", c).startswith("hermes -p gary auth add openai-codex --type oauth"))
+
+    def test_expiring_soon_is_flagged_but_ranks_below_a_cooldown(self):
+        c = cred(expiry={"expires_at": NOW + 3600, "renewable": False, "state": "expiring"})
+        self.assertEqual(k.state_of(c), "expiring")
+        self.assertEqual(k.state_of({**c, "status": "model-cooldown", "model_cooldowns": {"m": NOW + 60}}), "model-cooldown")
+
+    def test_renewable_login_is_healthy(self):
+        c = cred(expiry={"expires_at": NOW - 60, "renewable": True, "state": "renews"})
+        self.assertEqual(k.state_of(c), "ok")
+        self.assertIsNone(k.fix_for("ceo", c))
+
+    def test_anthropic_family_from_prefix_only(self):
+        self.assertEqual(k.anthropic_family("sk-ant-api03-xxxx"), "console key (sk-ant-api)")
+        self.assertEqual(k.anthropic_family("sk-ant-usr-xxxx"), "console key (sk-ant-usr)")
+        self.assertEqual(k.anthropic_family("sk-ant-svc-xxxx"), "console key (sk-ant-svc)")
+        self.assertEqual(k.anthropic_family("sk-ant-oat01-xxxx"), "subscription OAuth (sk-ant-oat)")
+        self.assertIsNone(k.anthropic_family(""))
+
+    def test_console_key_sent_as_oauth_is_wrong_auth_mode(self):
+        c = cred(provider="anthropic", id="a9", auth_type="api_key",
+                 auth_mode={"family": "console key (sk-ant-usr)", "sent_as": "oauth", "stored_as": "api_key", "mismatch": True})
+        self.assertEqual(k.state_of(c), "wrong-auth-mode")
+        self.assertIn("credit balance too low", k.note_for(c, NOW))
+        self.assertIn("auth add anthropic --type api-key", k.fix_for("ceo", c))
+        self.assertIn("auth remove anthropic a9", k.fix_for("ceo", c))
+
+    def test_alert_and_report_include_new_states(self):
+        c = cred(expiry={"expires_at": NOW - 60, "renewable": False, "state": "expired"})
+        text = k.alert([{"profile": "gary", "credentials": [c], "crons": [], "default_model": {}}], NOW)
+        self.assertIn("EXPIRED", text)
+        self.assertIn("auth add openai-codex --type oauth", text)
+
+    def test_env_names_never_reads_values(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-api03-SECRET\nEMPTY=\n# X=1\nexport OTHER='v'\n")
+            self.assertEqual(k.env_names(Path(d)), {"ANTHROPIC_API_KEY", "OTHER"})
+
+
 if __name__ == "__main__":
     unittest.main()
