@@ -1,6 +1,6 @@
 ---
 name: key-doctor
-description: Explain why a Hermes model key or login stopped working — "no credentials found", a /model picker that collapsed, cron jobs blocked on auth, a valid key failing with "credit balance too low". Lists every pooled credential in every profile with its bench state (benched, dead, per-model cooldown), the reason, when it ends, and the exact `hermes auth reset` command. Read-only; never prints tokens.
+description: Explain why a Hermes model key or login stopped working — "no credentials found", a /model picker that collapsed, cron jobs blocked on auth, a valid Anthropic key failing with "credit balance too low", a sign-in about to expire. Lists every pooled credential in every profile with its state (benched, dead, per-model cooldown, expiring, wrong auth mode), the reason, when it ends, and the exact profile-named fix command. Read-only; never prints tokens.
 ---
 
 # Key Doctor
@@ -38,6 +38,9 @@ The copy at `~/.hermes/scripts/key-doctor.py` is installed from `skills/key-doct
 | `MODEL COOLDOWN` | The credential works, but one model is blocked on it until the time shown. A cooldown longer than a week is not a rate limit; it matches the stuck-cooldown bug (NousResearch/hermes-agent#127917). | `hermes auth reset <provider> <id>` |
 | `DEAD` | The provider rejected the credential outright. | remove it and add it again |
 | stale bench | Marked exhausted, but the time has passed. Hermes should retry it; a reset makes sure. | `hermes auth reset ...` |
+| `EXPIRING` / `EXPIRED` | An OAuth sign-in with no refresh token, so it cannot renew itself. `EXPIRING` means it runs out within 24 h. Sign-ins that do have a refresh token renew on their own and stay `ok`. | `hermes -p <bot> auth add <provider> --type oauth`, then `auth remove` the old one |
+| `WRONG AUTH MODE` | An Anthropic Console key (`sk-ant-usr`, `sk-ant-svc`) that this Hermes sends as a subscription OAuth token. Anthropic then answers "credit balance too low" although the key and the account are fine (NousResearch/hermes-agent#133856). Tell the user they do not need to buy credit. | add a standard `sk-ant-api` key with `auth add anthropic --type api-key`, then `auth remove` the misread one |
+| `ANTHROPIC_API_KEY in .env` | A Console key in the Bot's `.env` next to a subscription login: Hermes can use the paid key and bill the API instead of the subscription (#97085). | remove it from `.env` if the user wants the subscription used |
 | `DEFAULT MODEL BLOCKED` | The Bot's own model has no usable login: this is "no credentials found". If a `fallback_model` works it says so instead. | the fix for the blocking login |
 | `CRON WILL FAIL` | An active cron job's model has no usable login; shows the job and its next run. | the fix for the blocking login |
 | `RISK` | Several Bots run their default model on one login with no backup: one rate limit stops all of them. | add a second login or a `fallback_model` |
