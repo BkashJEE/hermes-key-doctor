@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-10-15
+
+Desktop
+- **Always the local gateway.** The page used to send `hermes keydoctor` to whichever Hermes owned the focused chat. With a remote connection focused (a laptop reached over the network) that Hermes answered "'keydoctor' is not a hermes command". Key Doctor reads this machine's logins, so it now always asks the local gateway.
+- **A hung call can't block refreshes.** If the gateway restarts mid-request the call never settles; it is now given up after the CLI timeout plus 10 s instead of leaving "Checking…" stuck forever.
+
 ## 0.2.0 — 2026-10-15
 
 New checks
